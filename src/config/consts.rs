@@ -20,6 +20,8 @@ pub const STARTER_VEC: Vec3 = Vec3::new(
     3.
 );
 
+pub const STARTER_SNAKE_VEC: Vec3 = Vec3::new(20., 20., 4.);
+
 pub const SNAKE_SEGMENT_COLOR_HEX: &str = "#FFFFFF";
 pub const SNAKE_HEAD_COLOR_HEX: &str = "#2ECC71";
 pub const FOOD_COLOR_HEX: &str = "#30D5C8"; 

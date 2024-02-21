@@ -6,6 +6,9 @@ use bevy::{
 
 use rand::seq::IteratorRandom;
 
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
+
 mod config;
 use config::consts::*;
 
@@ -44,30 +47,29 @@ fn main() {
 		.add_systems(Startup, (
 			setup,
 			spawn_snake,
-			//debug::draw_helper_grid
 		))
-		//.add_systems(Update, (make_visible, snake_movement, tile_color_change, debug::my_cursor_system))
 		.add_systems(FixedUpdate, (
 			snake_movement_input,
 			snake_movement,
-			tile_color_change,
-			//debug::my_cursor_system,
+			game_over,
 			check_for_collisions,
 			snake_growth,
 			spawn_random_food
 		).chain())
-		.add_systems(Update, make_visible)
+		.add_systems(Update, (
+			make_visible,
+			tile_color_change,
+		))
 		.insert_resource(Time::<Fixed>::from_seconds(0.15))
 		.insert_resource(SnakeSegments::default())
 		.insert_resource(LastTailPosition::default())
 		.add_event::<GrowthEvent>()
+		.add_event::<GameOverEvent>()
 		.run();
 }
 
 #[derive(Component)]
-struct Wall {
-	visible: bool
-}
+struct Wall;
 
 fn setup(
 	mut commands: Commands,
@@ -84,7 +86,7 @@ fn setup(
 	}, MainCamera));
 
 	let mut vec_xyz = STARTER_VEC;
-	for i in 1..=SQUARE_AMOUNT as i32 { // for j in 1..17
+	for i in 1..=SQUARE_AMOUNT as i32 {
 		for j in 1..=SQUARE_AMOUNT as i32 {
 			let is_even: bool = (i + j) % 2 == 0;
 			let [r, g, b, _a] = if is_even {
@@ -113,15 +115,12 @@ fn setup(
 		vec_xyz.y += SQUARE_SIZE; 
 	}
 
-	commands.spawn(WallBundle::new(WallLocation::Left));
-	commands.spawn(WallBundle::new(WallLocation::Right));
-	commands.spawn(WallBundle::new(WallLocation::Bottom));
-	commands.spawn(WallBundle::new(WallLocation::Top));
-
-	commands.spawn(WallBundle::new(WallLocation::LeftHide));
-	commands.spawn(WallBundle::new(WallLocation::RightHide));
-	commands.spawn(WallBundle::new(WallLocation::BottomHide));
-	commands.spawn(WallBundle::new(WallLocation::TopHide));
+	for location in WallLocation::iter() {
+		commands.spawn(WallBundle::new(&location))
+			.with_children(|parent| {
+				parent.spawn(CollisionWallBundle::new(&location));
+			});
+	}
 }
 
 fn spawn_random_food(
@@ -129,7 +128,7 @@ fn spawn_random_food(
 	mut meshes: ResMut<Assets<Mesh>>,
 	mut materials: ResMut<Assets<ColorMaterial>>,
 	tile_query: Query<&Transform, With<Tile>>,
-	food_query: Query<&Przysmak>
+	food_query: Query<&SnakeTreat>
 ) {
 	if let Ok(_food) = food_query.get_single() {
 		return;
@@ -149,7 +148,7 @@ fn spawn_random_food(
 			material: materials.add(ColorMaterial::from(Color::hex(FOOD_COLOR_HEX).unwrap())),
 			..default()
 			},
-			Przysmak,
+			SnakeTreat,
 			Collider,
 		));
 	}
@@ -179,33 +178,10 @@ fn spawn_snake_segment(
 	},
 	SnakeSegment,
 	SnakeMarker,)).id()
-
 }
-
-/*
-fn spawn_snake(
-    mut commands: Commands
-) {
-    commands.spawn((SpriteBundle {
-        sprite: Sprite {
-            color: Color::hex(SNAKE_HEAD_COLOR_HEX).unwrap(),
-            ..default()
-        },
-        transform: Transform {
-            scale:  Vec3::new(SQUARE_SIZE, SQUARE_SIZE, 5.),
-            translation: Vec3::new(20., 20., 4.),
-            ..default()
-        },
-		..default()
-    },
-	SnakeMarker,
-	SnakeHead,
-	));
-}
- */
 
 #[derive(Component)]
-struct Przysmak;
+struct SnakeTreat;
 
 #[derive(Resource, Default)]
 struct LastTailPosition(Option<Vec3>);
@@ -230,7 +206,7 @@ fn spawn_snake(
 			},
 			transform: Transform {
 				scale:  Vec3::new(SQUARE_SIZE, SQUARE_SIZE, 5.),
-				translation: Vec3::new(20., 20., 4.),
+				translation: STARTER_SNAKE_VEC,
 				..default()
 			},
 			..default()
@@ -238,9 +214,11 @@ fn spawn_snake(
 		SnakeMarker,
 		SnakeHead { direction: Direction::Right },
 		)).id(),
-		spawn_snake_segment(commands, Vec2::new(-20., 20.)),
+		spawn_snake_segment(commands, STARTER_SNAKE_VEC.truncate().min(Vec2::new(SQUARE_SIZE, 0.))),
 	]);
 }
+
+fn make_snake_visible() {}
 
 fn tile_color_change(
 	keyboard_input: Res<Input<KeyCode>>,
@@ -252,8 +230,8 @@ fn tile_color_change(
 			let mut color_mat = materials.get_mut(color).unwrap();
 			
 			let current_rgba: [u8; 4] = color_mat.color.as_rgba_u8();
-			//ColorMaterial::from(Color::rgb_u8(r, g, b))
-			let [r, g, b, a] = if current_rgba == TILE1_COLOR {
+			
+			let [r, g, b, _a] = if current_rgba == TILE1_COLOR {
 				TILE2_COLOR
 			} else {
 				TILE1_COLOR
@@ -288,6 +266,11 @@ fn snake_movement_input(
 	}
 }
 
+#[derive(Component)]
+struct RenderTime {
+	timer: Timer,
+}
+
 fn snake_movement(
 	segments: ResMut<SnakeSegments>,
 	mut heads: Query<(Entity, &SnakeHead)>,
@@ -301,24 +284,18 @@ fn snake_movement(
 			.collect::<Vec<Vec3>>();
 		let mut head_pos = positions.get_mut(head_entity).unwrap();
 
-		let mut pos_offset_x: f32 = 0.;
-		let mut pos_offset_y: f32 = 0.; 
 		match &head.direction {
 			Direction::Left => {
-				head_pos.translation.x -= 40.;
-				//pos_offset_x += SQUARE_SIZE - 5.;
+				head_pos.translation.x -= SQUARE_SIZE;
 			}
 			Direction::Right => {
-				head_pos.translation.x += 40.;
-				//pos_offset_x += -SQUARE_SIZE + 5.;
+				head_pos.translation.x += SQUARE_SIZE;
 			}
 			Direction::Down => {
-				head_pos.translation.y -= 40.;
-				//pos_offset_y += SQUARE_SIZE - 5.;
+				head_pos.translation.y -= SQUARE_SIZE;
 			}	
 			Direction::Up => {
-				head_pos.translation.y += 40.;
-				//pos_offset_y += -SQUARE_SIZE + 5.;
+				head_pos.translation.y += SQUARE_SIZE;
 			}
 		};
 		segment_positions
@@ -326,8 +303,6 @@ fn snake_movement(
 			.zip(segments.iter().skip(1))
 			.for_each(|(pos, segment)| {
 				positions.get_mut(*segment).unwrap().translation = *pos;
-				positions.get_mut(*segment).unwrap().translation.x += pos_offset_x;
-				positions.get_mut(*segment).unwrap().translation.y += pos_offset_y;
 			});
 		*last_tail_position = LastTailPosition(Some(*segment_positions.last().unwrap()));
 	}
@@ -382,16 +357,22 @@ struct CollisionEvent;
 #[derive(Event, Default)]
 struct GrowthEvent;
 
+#[derive(Event, Default)]
+struct GameOverEvent;
+
+// TODO: Refactor walls
+// Check wall location and apply proper bounds
 fn check_for_collisions(
 	mut commands: Commands,
 	mut growth_event_writer: EventWriter<GrowthEvent>,
+	mut game_over_event_writer: EventWriter<GameOverEvent>,
 	mut snake_head_query: Query<&mut Transform, (With<SnakeHead>, Without<Collider>)>,
-	collider_query: Query<(Entity, &Transform, Option<&Przysmak>, Option<&Wall>), With<Collider>>,
+	collider_query: Query<(Entity, &Transform, Option<&SnakeTreat>), With<Collider>>,
 ) {
 	let mut snake_head_transform = snake_head_query.single_mut(); 
 	let snake_size = snake_head_transform.scale.truncate();
 
-	for (collider_entity, transform, maybe_przysmak, maybe_wall) in &collider_query {
+	for (collider_entity, transform, maybe_przysmak) in &collider_query {
 		let collision = collide(
 			snake_head_transform.translation,
 			snake_size,
@@ -406,7 +387,8 @@ fn check_for_collisions(
 				commands.entity(collider_entity).despawn();
 				growth_event_writer.send(GrowthEvent);
 
-			} else if maybe_wall.is_some() && !maybe_wall.unwrap().visible {
+			} else {
+				game_over_event_writer.send(GameOverEvent);
 				(*snake_head_transform).translation = Vec3::new(20., 20., 4.);
 			}
 			
@@ -414,15 +396,12 @@ fn check_for_collisions(
 	}
 }
 
+#[derive(EnumIter)]
 enum WallLocation {
 	Left,
 	Right,
 	Top,
 	Bottom,
-	LeftHide,
-	RightHide,
-	TopHide,
-	BottomHide,
 }
 
 impl WallLocation {
@@ -439,20 +418,24 @@ impl WallLocation {
 			WallLocation::Right => Vec2::new(Self::RIGHT_WALL, 0.),
 			WallLocation::Top => Vec2::new(0., Self::TOP_WALL),
 			WallLocation::Bottom => Vec2::new(0., Self::BOTTTOM_WALL),
+		}
+	}
 
-			WallLocation::LeftHide => Vec2::new(Self::LEFT_WALL - 10., 0.),
-			WallLocation::RightHide => Vec2::new(Self::RIGHT_WALL + 10., 0.),
-			WallLocation::TopHide => Vec2::new(0., Self::TOP_WALL + 10.),
-			WallLocation::BottomHide => Vec2::new(0., Self::BOTTTOM_WALL - 10.),
+	fn collision_position(&self) -> Vec2 {
+		match self {
+			WallLocation::Left => Vec2::new(Self::LEFT_WALL - 10., 0.),
+			WallLocation::Right => Vec2::new(Self::RIGHT_WALL + 10., 0.),
+			WallLocation::Top => Vec2::new(0., Self::TOP_WALL + 10.),
+			WallLocation::Bottom => Vec2::new(0., Self::BOTTTOM_WALL - 10.),
 		}
 	}
 
 	fn size(&self) -> Vec2 {
 		match self {
-			WallLocation::Left | WallLocation::Right | WallLocation::LeftHide | WallLocation::RightHide => {
+			WallLocation::Left | WallLocation::Right => {
 				Vec2::new( 5., SQUARE_AMOUNT * SQUARE_SIZE)
 			}
-			WallLocation::Top | WallLocation::Bottom | WallLocation::TopHide | WallLocation::BottomHide => {
+			WallLocation::Top | WallLocation::Bottom => {
 				Vec2::new(SQUARE_AMOUNT * SQUARE_SIZE, 5.)
 			}
 		}
@@ -460,37 +443,68 @@ impl WallLocation {
 }
 
 #[derive(Bundle)]
+struct CollisionWallBundle {
+	sprite_bundle: SpriteBundle,
+	collider: Collider
+}
+
+impl CollisionWallBundle {
+	fn new(location: &WallLocation) -> CollisionWallBundle {
+		CollisionWallBundle {
+			sprite_bundle: SpriteBundle {
+				sprite: Sprite {
+					..default()
+				},
+				transform: Transform {
+					translation: (*location).collision_position().extend(3.),
+					scale: (*location).size().extend(5.),
+					..default()
+				},
+				visibility: Visibility::Hidden,
+				..default()
+			},
+			collider: Collider,
+		}
+	}
+}
+
+#[derive(Bundle)]
 struct WallBundle {
 	sprite_bundle: SpriteBundle,
-	collider: Collider,
-	wall_marker_component: Wall,
 }
 
 impl WallBundle {
-	fn new(location: WallLocation) -> WallBundle {
-		use WallLocation::*;
-
-		let visible = match location {
-			LeftHide | RightHide | TopHide | BottomHide => Visibility::Hidden,
-			_ => Visibility::Visible,
-		};
-
+	fn new(location: &WallLocation) -> WallBundle {
 		WallBundle {
 			sprite_bundle: SpriteBundle {
 				sprite: Sprite {
 					color: Color::hex("#000000").unwrap(),
 					..default()
 				},
-				visibility: visible,
 				transform: Transform {
-					translation: location.position().extend(3.),
-					scale: location.size().extend(5.),
+					translation: (*location).position().extend(3.),
+					scale: (*location).size().extend(5.),
 					..default()
 				},
 				..default()
 			},
-			collider: Collider,
-			wall_marker_component: Wall{ visible: visible == Visibility::Visible },
 		}
+	}
+}
+
+fn game_over(
+	mut commands: Commands,
+	mut reader: EventReader<GameOverEvent>,
+	segments_res: ResMut<SnakeSegments>,
+	food: Query<Entity, With<SnakeTreat>>,
+	segments: Query<Entity, With<SnakeSegment>>,
+	snake_head: Query<Entity, With<SnakeHead>>,
+) {
+	if reader.read().next().is_some() {
+		commands.entity(snake_head.single()).despawn();
+		for ent in food.iter().chain(segments.iter()) {
+			commands.entity(ent).despawn();
+		}
+		spawn_snake(commands, segments_res);
 	}
 }
