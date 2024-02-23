@@ -1,7 +1,7 @@
+use std::borrow::BorrowMut;
+
 use bevy::{
-	core::FrameCount, input::keyboard, prelude::*, render::camera::ScalingMode, sprite::{
-		collide_aabb::{collide, Collision}, MaterialMesh2dBundle
-	}, transform::commands, window::{PresentMode, WindowResolution}
+	core::FrameCount, input::keyboard, math::{bounding::*, primitives::*, vec3}, prelude::*, render::camera::ScalingMode, sprite::MaterialMesh2dBundle, time::Stopwatch, transform::commands, window::{PresentMode, WindowResolution}
 };
 
 use rand::seq::IteratorRandom;
@@ -54,11 +54,13 @@ fn main() {
 			game_over,
 			check_for_collisions,
 			snake_growth,
-			spawn_random_food
+			spawn_random_food,
+			make_snake_visible,
 		).chain())
 		.add_systems(Update, (
 			make_visible,
 			tile_color_change,
+			bevy::window::close_on_esc,
 		))
 		.insert_resource(Time::<Fixed>::from_seconds(0.15))
 		.insert_resource(SnakeSegments::default())
@@ -96,7 +98,7 @@ fn setup(
 			};
 
 			commands.spawn((MaterialMesh2dBundle {
-				mesh: meshes.add(Mesh::from(shape::Quad::default())).into(),
+				mesh: meshes.add(Rectangle::default()).into(),
 				transform: Transform {
 					translation: vec_xyz,
 					scale: Vec3::new(SQUARE_SIZE, SQUARE_SIZE, 0.),
@@ -128,7 +130,9 @@ fn spawn_random_food(
 	mut meshes: ResMut<Assets<Mesh>>,
 	mut materials: ResMut<Assets<ColorMaterial>>,
 	tile_query: Query<&Transform, With<Tile>>,
-	food_query: Query<&SnakeTreat>
+	food_query: Query<&SnakeTreat>,
+	segments: Query<Entity, With<SnakeSegment>>,
+	positions: Query<&Transform, With<SnakeMarker>>,
 ) {
 	if let Ok(_food) = food_query.get_single() {
 		return;
@@ -142,8 +146,38 @@ fn spawn_random_food(
 		food_transform.scale.x *= 0.75;
 		food_transform.scale.y *= 0.75;
 
+		let segment_positions = segments
+			.iter()
+			.map(|e| positions.get(e).unwrap().clone())
+			.collect::<Vec<Transform>>();
+
+		for seg_pos in segment_positions {
+			let collision = 
+			Aabb2d::new(
+				seg_pos.translation.truncate(),
+				seg_pos.scale.truncate() / 2.
+			).intersects(
+			&Aabb2d::new(
+				food_transform.translation.truncate(),
+				food_transform.scale.truncate() / 2.
+			));
+
+			if collision {
+				return;
+			}
+		}
+		// let collision = 
+		// Aabb2d::new(
+		// 	snake_head_transform.translation.truncate(),
+		// 	snake_size / 2.
+		// ).intersects(
+		// &Aabb2d::new(
+		// 	transform.translation.truncate(),
+		// 	transform.scale.truncate() / 2.
+		// ));
+
 		commands.spawn((MaterialMesh2dBundle {
-			mesh: meshes.add(Mesh::from(shape::Circle::default())).into(),
+			mesh: meshes.add(Circle::default()).into(),
 			transform: food_transform,
 			material: materials.add(ColorMaterial::from(Color::hex(FOOD_COLOR_HEX).unwrap())),
 			..default()
@@ -177,7 +211,8 @@ fn spawn_snake_segment(
 		..default()
 	},
 	SnakeSegment,
-	SnakeMarker,)).id()
+	SnakeMarker,
+	)).id()
 }
 
 #[derive(Component)]
@@ -196,7 +231,7 @@ struct SnakeHead {
 
 fn spawn_snake(
     mut commands: Commands,
-	mut segments: ResMut<SnakeSegments>
+	mut segments: ResMut<SnakeSegments>,
 ) {
 	*segments = SnakeSegments(vec![
 		commands.spawn((SpriteBundle {
@@ -209,19 +244,37 @@ fn spawn_snake(
 				translation: STARTER_SNAKE_VEC,
 				..default()
 			},
+			//visibility: Visibility::Hidden,
 			..default()
 		},
 		SnakeMarker,
 		SnakeHead { direction: Direction::Right },
 		)).id(),
-		spawn_snake_segment(commands, STARTER_SNAKE_VEC.truncate().min(Vec2::new(SQUARE_SIZE, 0.))),
 	]);
+	let last_tail_position = LastTailPosition(Some(Vec3::new(-20.0, 20.0, 4.0)));
+	segments.push(spawn_snake_segment(commands, last_tail_position.0.unwrap().truncate()));
+	//spawn_snake_segment(commands, STARTER_SNAKE_VEC.truncate().min(Vec2::new(SQUARE_SIZE, 0.)));
+}
+//segments.push(spawn_snake_segment(commands, last_tail_position.0.unwrap().truncate()));
+// /// detect new enemies and print their health
+// fn debug_new_hostiles(
+//     query: Query<(Entity, &Health), Added<Enemy>>,
+// ) {
+//     for (entity, health) in query.iter() {
+//         eprintln!("Entity {:?} is now an enemy! HP: {}", entity, health.hp);
+//     }
+// }
+
+fn make_snake_visible(mut last_time: Local<f32>, time: Res<Time>, fixed_time: Res<Time<Fixed>>, mut query: Query<&mut Visibility, Added<SnakeHead>>) {
+	if time.elapsed_seconds() > 0.45 {
+		for mut visibility in query.iter_mut() {
+			*visibility = Visibility::Visible;
+		}
+	}
 }
 
-fn make_snake_visible() {}
-
 fn tile_color_change(
-	keyboard_input: Res<Input<KeyCode>>,
+	keyboard_input: Res<ButtonInput<KeyCode>>,
 	mut materials: ResMut<Assets<ColorMaterial>>,
 	mut tiles: Query<&mut Handle<ColorMaterial>, With<Tile>>,
 ) {
@@ -243,18 +296,18 @@ fn tile_color_change(
 }
 
 fn snake_movement_input(
-	keyboard_input: Res<Input<KeyCode>>,
+	keyboard_input: Res<ButtonInput<KeyCode>>,
 	mut head_positions: Query<&mut SnakeHead>,
 ) {
 	if let Some(mut head) = head_positions.iter_mut().next() {
 		let dir: Direction =
-			if keyboard_input.any_pressed([KeyCode::Left, KeyCode::A]) {
+			if keyboard_input.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) {
 				Direction::Left
-			} else if keyboard_input.any_pressed([KeyCode::Right, KeyCode::D]) {
+			} else if keyboard_input.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) {
 				Direction::Right
-			} else if keyboard_input.any_pressed([KeyCode::Down, KeyCode::S]) {
+			} else if keyboard_input.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]) {
 				Direction::Down
-			} else if keyboard_input.any_pressed([KeyCode::Up, KeyCode::W]) {
+			} else if keyboard_input.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]) {
 				Direction::Up
 			} else {
 				head.direction
@@ -268,7 +321,7 @@ fn snake_movement_input(
 
 #[derive(Component)]
 struct RenderTime {
-	timer: Timer,
+	stopwatch: Stopwatch,
 }
 
 fn snake_movement(
@@ -276,6 +329,7 @@ fn snake_movement(
 	mut heads: Query<(Entity, &SnakeHead)>,
 	mut positions: Query<&mut Transform, With<SnakeMarker>>,
 	mut last_tail_position: ResMut<LastTailPosition>,
+	mut game_over_event_writer: EventWriter<GameOverEvent>,
 ) {
 	if let Some((head_entity, head)) = heads.iter_mut().next() {
 		let segment_positions = segments
@@ -298,11 +352,16 @@ fn snake_movement(
 				head_pos.translation.y += SQUARE_SIZE;
 			}
 		};
+		let head_pos = positions.get(head_entity).unwrap().to_owned();
+
 		segment_positions
 			.iter()
 			.zip(segments.iter().skip(1))
 			.for_each(|(pos, segment)| {
 				positions.get_mut(*segment).unwrap().translation = *pos;
+				if *pos == head_pos.translation {
+					game_over_event_writer.send(GameOverEvent);
+				}
 			});
 		*last_tail_position = LastTailPosition(Some(*segment_positions.last().unwrap()));
 	}
@@ -373,14 +432,24 @@ fn check_for_collisions(
 	let snake_size = snake_head_transform.scale.truncate();
 
 	for (collider_entity, transform, maybe_przysmak) in &collider_query {
-		let collision = collide(
-			snake_head_transform.translation,
-			snake_size,
-			transform.translation,
-			transform.scale.truncate(),
-		);
+		// let collision = collide(
+		// 	snake_head_transform.translation,
+		// 	snake_size,
+		// 	transform.translation,
+		// 	transform.scale.truncate(),
+		// );
 
-		if let Some(collision) = collision {
+		let collision = 
+		Aabb2d::new(
+			snake_head_transform.translation.truncate(),
+			snake_size / 2.
+		).intersects(
+		&Aabb2d::new(
+			transform.translation.truncate(),
+			transform.scale.truncate() / 2.
+		));
+
+		if collision {
 			println!("Collision at {}", transform.translation);
 			
 			if maybe_przysmak.is_some() {
@@ -389,7 +458,8 @@ fn check_for_collisions(
 
 			} else {
 				game_over_event_writer.send(GameOverEvent);
-				(*snake_head_transform).translation = Vec3::new(20., 20., 4.);
+				//(*snake_head_transform).translation = Vec3::new(20., 20., 4.);
+				(*snake_head_transform).scale = Vec3::new(0.0, 0.0, 0.0);
 			}
 			
 		}
@@ -456,7 +526,7 @@ impl CollisionWallBundle {
 					..default()
 				},
 				transform: Transform {
-					translation: (*location).collision_position().extend(3.),
+					translation: (*location).collision_position().extend(4.),
 					scale: (*location).size().extend(5.),
 					..default()
 				},
@@ -482,7 +552,7 @@ impl WallBundle {
 					..default()
 				},
 				transform: Transform {
-					translation: (*location).position().extend(3.),
+					translation: (*location).position().extend(4.5),
 					scale: (*location).size().extend(5.),
 					..default()
 				},
